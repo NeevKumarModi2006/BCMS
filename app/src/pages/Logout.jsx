@@ -9,13 +9,16 @@ export default function Logout() {
       try {
         await fetch(`${import.meta.env.VITE_API_URL}/auth/logout`, {
           method: "POST",
-          credentials: "include", // clear cookie session on backend
+          credentials: "include", // ✅ REQUIRED to clear HttpOnly cookies
         });
-      } catch {}
-      navigate("/", { replace: true });
+      } catch (err) {
+        console.error("Logout error:", err);
+      } finally {
+        navigate("/", { replace: true });
+      }
     }
     logout();
   }, [navigate]);
 
-  return <div>Logging out...</div>;
+  return <div className="container">Logging you out...</div>;
 }

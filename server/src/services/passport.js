@@ -1,7 +1,6 @@
 import passport from "passport";
 import { Strategy as GoogleStrategy } from "passport-google-oauth20";
 import dotenv from "dotenv";
-import { pool } from "../db/pool.js";
 
 dotenv.config();
 
@@ -14,35 +13,18 @@ passport.use(
     },
     async (_, __, profile, done) => {
       try {
-        const email = profile.emails[0].value;
+        const email = profile.emails?.[0]?.value;
         const name = profile.displayName;
         const picture = profile.photos?.[0]?.value;
-        const domain = email.split("@")[1];
 
-        // only allow nitw.ac.in domain
-        if (!domain.includes("nitw.ac.in"))
-          return done(null, false, { message: "Unauthorized domain" });
+        if (!email) return done(null, false, { message: "Email not found" });
 
-        const result = await pool.query(
-          "SELECT * FROM users WHERE email=$1",
-          [email]
-        );
-
-        let user;
-        if (result.rows.length) {
-          user = result.rows[0];
-          await pool.query("UPDATE users SET last_login_at=now() WHERE id=$1", [user.id]);
-        } else {
-          const inserted = await pool.query(
-            "INSERT INTO users (email, name, picture, role) VALUES ($1,$2,$3,'user') RETURNING *",
-            [email, name, picture]
-          );
-          user = inserted.rows[0];
-        }
-
-        done(null, user);
+        // ✅ Just pass the Google profile data, DON'T create user here
+        // Let the callback route handle user creation with proper domain checks
+        return done(null, { email, name, picture });
       } catch (err) {
-        done(err, null);
+        console.error("GoogleStrategy error:", err.message);
+        return done(err, null);
       }
     }
   )

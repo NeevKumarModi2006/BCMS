@@ -1,93 +1,224 @@
-import { useState, useEffect } from "react";
+import { useEffect, useState } from "react";
 
 export default function AdminBlocks() {
   const [courts, setCourts] = useState([]);
-  const [courtId, setCourtId] = useState("");
-  const [lot, setLot] = useState("morning");
-  const [startDate, setStartDate] = useState("");
-  const [endDate, setEndDate] = useState("");
-  const [reason, setReason] = useState("");
-  const [message, setMessage] = useState("");
+  const [blocks, setBlocks] = useState([]);
+  const [form, setForm] = useState({
+    court_id: "",
+    lot: "morning",
+    start_date: "",
+    end_date: "",
+    reason: "",
+  });
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState("");
+
+  async function loadCourts() {
+    try {
+      const res = await fetch(`${import.meta.env.VITE_API_URL}/courts`, {
+        credentials: "include",
+      });
+      const data = await res.json();
+      setCourts(data.items || []);
+    } catch (err) {
+      console.error("Error loading courts:", err);
+    }
+  }
+
+  async function loadBlocks() {
+    try {
+      const res = await fetch(`${import.meta.env.VITE_API_URL}/admin/blocks`, {
+        credentials: "include",
+      });
+      const data = await res.json();
+      if (res.ok) setBlocks(data.items || []);
+      else alert(data.error || "Failed to load blocks");
+    } catch (err) {
+      console.error("Error loading blocks:", err);
+      alert("Failed to load blocks.");
+    }
+  }
 
   useEffect(() => {
     loadCourts();
+    loadBlocks();
   }, []);
 
-  const loadCourts = async () => {
-    const res = await fetch(`${import.meta.env.VITE_API_URL}/admin/courts`, {
-      credentials: "include", // ✅ send HttpOnly cookies
-    });
-    const data = await res.json();
-    setCourts(data.items || []);
-  };
-
-  const submit = async (e) => {
+  async function handleSubmit(e) {
     e.preventDefault();
-    if (!courtId || !startDate || !endDate)
-      return setMessage("Please select court and date range.");
+    setError("");
+    setLoading(true);
+    try {
+      const res = await fetch(`${import.meta.env.VITE_API_URL}/admin/blocks`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        credentials: "include",
+        body: JSON.stringify(form),
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || "Failed to create block");
+      setForm({
+        court_id: "",
+        lot: "morning",
+        start_date: "",
+        end_date: "",
+        reason: "",
+      });
+      loadBlocks();
+    } catch (err) {
+      setError(err.message);
+    } finally {
+      setLoading(false);
+    }
+  }
 
-    const res = await fetch(`${import.meta.env.VITE_API_URL}/admin/blocks`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      credentials: "include",
-      body: JSON.stringify({ court_id: courtId, lot, start_date: startDate, end_date: endDate, reason }),
-    });
-    const data = await res.json();
-    if (res.ok) {
-      setMessage("✅ Block created successfully!");
-      setReason("");
-    } else setMessage(`❌ ${data.error || "Failed to create block"}`);
-  };
+  async function removeBlock(id) {
+    if (!confirm("Delete this block?")) return;
+    try {
+      await fetch(`${import.meta.env.VITE_API_URL}/admin/blocks/${id}`, {
+        method: "DELETE",
+        credentials: "include",
+      });
+      loadBlocks();
+    } catch (err) {
+      alert("Failed to delete block.");
+    }
+  }
 
   return (
     <div className="container">
-      <h1 className="h1">Court Block Management</h1>
-      <p className="kv">Block AM/PM lots for up to 1 month in advance.</p>
+      <h1 className="page-title">Manage Blocks</h1>
+      <p className="page-subtitle">
+        Create or remove morning/evening court blocks (up to 30 days ahead).
+      </p>
 
-      <form onSubmit={submit} className="card grid mt16" style={{ gap: "16px" }}>
-        <div>
-          <label className="label">Court</label>
-          <select value={courtId} onChange={(e) => setCourtId(e.target.value)}>
+      <form className="card" onSubmit={handleSubmit}>
+        <div className="form-group">
+          <label>Court</label>
+          <select
+            required
+            value={form.court_id}
+            onChange={(e) =>
+              setForm({ ...form, court_id: Number(e.target.value) })
+            }
+          >
             <option value="">Select court</option>
             {courts.map((c) => (
-              <option key={c.id} value={c.id}>{c.name}</option>
+              <option key={c.id} value={c.id}>
+                {c.name}
+              </option>
             ))}
           </select>
         </div>
 
-        <div className="grid grid-2">
-          <div>
-            <label className="label">Lot</label>
-            <select value={lot} onChange={(e) => setLot(e.target.value)}>
-              <option value="morning">Morning</option>
-              <option value="evening">Evening</option>
-            </select>
-          </div>
-          <div>
-            <label className="label">Reason (optional)</label>
-            <input
-              value={reason}
-              onChange={(e) => setReason(e.target.value)}
-              placeholder="Maintenance / Event..."
-            />
-          </div>
-        </div>
-
-        <div className="grid grid-2">
-          <div>
-            <label className="label">Start Date</label>
-            <input type="date" value={startDate} onChange={(e) => setStartDate(e.target.value)} />
-          </div>
-          <div>
-            <label className="label">End Date</label>
-            <input type="date" value={endDate} onChange={(e) => setEndDate(e.target.value)} />
+        <div className="form-group">
+          <label>Lot</label>
+          <div style={{ display: "flex", gap: "20px", marginTop: "4px" }}>
+            <label>
+              <input
+                type="radio"
+                name="lot"
+                value="morning"
+                checked={form.lot === "morning"}
+                onChange={(e) => setForm({ ...form, lot: e.target.value })}
+              />{" "}
+              Morning
+            </label>
+            <label>
+              <input
+                type="radio"
+                name="lot"
+                value="evening"
+                checked={form.lot === "evening"}
+                onChange={(e) => setForm({ ...form, lot: e.target.value })}
+              />{" "}
+              Evening
+            </label>
           </div>
         </div>
 
-        <button type="submit" className="btn btn-primary">Block Lot</button>
+        <div className="form-group">
+          <label>Start Date</label>
+          <input
+            type="date"
+            required
+            value={form.start_date}
+            onChange={(e) => setForm({ ...form, start_date: e.target.value })}
+          />
+        </div>
+
+        <div className="form-group">
+          <label>End Date</label>
+          <input
+            type="date"
+            required
+            value={form.end_date}
+            onChange={(e) => setForm({ ...form, end_date: e.target.value })}
+          />
+        </div>
+
+        <div className="form-group">
+          <label>Reason (optional)</label>
+          <input
+            type="text"
+            placeholder="Maintenance, event, etc."
+            value={form.reason}
+            onChange={(e) => setForm({ ...form, reason: e.target.value })}
+          />
+        </div>
+
+        {error && <div className="alert warn">{error}</div>}
+
+        <button className="btn" disabled={loading}>
+          {loading ? "Saving..." : "Create Block"}
+        </button>
       </form>
 
-      {message && <p className="mt16 small">{message}</p>}
+      <h2 className="page-subtitle" style={{ marginTop: "2rem" }}>
+        Active Blocks
+      </h2>
+
+      <div className="table-wrapper">
+        <table className="styled-table">
+          <thead>
+            <tr>
+              <th>Court</th>
+              <th>Lot</th>
+              <th>Start</th>
+              <th>End</th>
+              <th>Reason</th>
+              <th>Action</th>
+            </tr>
+          </thead>
+          <tbody>
+            {blocks.length > 0 ? (
+              blocks.map((b) => (
+                <tr key={b.id}>
+                  <td>{b.court_name}</td>
+                  <td className="cap">{b.lot}</td>
+                  <td>{b.start_date}</td>
+                  <td>{b.end_date}</td>
+                  <td>{b.reason || "-"}</td>
+                  <td>
+                    <button
+                      className="btn-sm btn-ban"
+                      onClick={() => removeBlock(b.id)}
+                    >
+                      Delete
+                    </button>
+                  </td>
+                </tr>
+              ))
+            ) : (
+              <tr>
+                <td colSpan="6" style={{ textAlign: "center", color: "gray" }}>
+                  No blocks currently active.
+                </td>
+              </tr>
+            )}
+          </tbody>
+        </table>
+      </div>
     </div>
   );
 }

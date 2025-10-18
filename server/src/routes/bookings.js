@@ -6,17 +6,14 @@ import jwt from "jsonwebtoken";
 
 const router = express.Router();
 
-// 🕐 Local date helper (midnight in server's timezone)
+// 🕐 Local date helper
 function localDateFromYMD(ymd) {
   const [y, m, d] = ymd.split("-").map(Number);
-  return new Date(y, m - 1, d, 0, 0, 0, 0); // midnight local time
+  return new Date(y, m - 1, d, 0, 0, 0, 0);
 }
 
 /* -----------------------------------------------------------
-   1️⃣  GET /bookings/suggest  →  get available continuous slots
------------------------------------------------------------ */
-/* -----------------------------------------------------------
-   1️⃣  GET /bookings/suggest  →  get available continuous slots
+   1️⃣  GET /bookings/suggest → suggest slots (block-aware)
 ----------------------------------------------------------- */
 router.get("/suggest", requireAuth, async (req, res) => {
   try {
@@ -26,7 +23,6 @@ router.get("/suggest", requireAuth, async (req, res) => {
     const today = localDateFromYMD(new Date().toISOString().slice(0, 10));
     const requested = localDateFromYMD(date);
     const diffDays = Math.round((requested - today) / (24 * 60 * 60 * 1000));
-
     if (diffDays < 0 || diffDays > 2) {
       return res.status(400).json({
         error:
@@ -35,43 +31,45 @@ router.get("/suggest", requireAuth, async (req, res) => {
     }
 
     const pCount = parseInt(participants || 2);
-
-    // Duration logic: for 2 participants, allow 15 or 30 min selection
     let duration;
-    if (pCount === 2) {
-      duration = durationParam === "15" ? 15 : 30; // default to 30 if not specified
-    } else if (pCount === 3) {
-      duration = 45;
-    } else {
-      duration = 60; // 4, 5, 6 participants
-    }
+    if (pCount === 2) duration = durationParam === "15" ? 15 : 30;
+    else if (pCount === 3) duration = 45;
+    else duration = 60;
 
-    // Determine weekday/weekend
-    const day = requested.getDay(); // 0 = Sunday, 6 = Saturday
+    const day = requested.getDay(); // 0 = Sun, 6 = Sat
     const isWeekend = day === 0 || day === 6;
 
-    // Time windows based on selection
-    let windowStart, windowEnd;
-
+    let windowStart, windowEnd, lot;
     if (window === "morning") {
       windowStart = "06:00";
       windowEnd = isWeekend ? "11:00" : "09:00";
+      lot = "morning";
     } else if (window === "evening") {
       windowStart = "16:00";
       windowEnd = "22:00";
+      lot = "evening";
     } else {
-      // Full Day = Morning + Evening (skip afternoon gap)
-      windowStart = "06:00";
-      windowEnd = isWeekend ? "11:00" : "09:00";
+      // full = both lots
+      lot = null;
     }
 
     const available = [];
-
     const courts = await pool.query(
       "SELECT * FROM courts WHERE is_active=true ORDER BY id"
     );
 
     for (const court of courts.rows) {
+      // 🧱 Block check: skip blocked courts for that date & lot
+      const blockQuery = await pool.query(
+        `SELECT 1 FROM blocks
+         WHERE court_id=$1
+           AND $2::date BETWEEN start_date AND end_date
+           AND ($3::text IS NULL OR lot=$3)`,
+        [court.id, date, lot]
+      );
+      if (blockQuery.rowCount > 0) continue; // skip blocked court/time window
+
+      // existing busy slots
       const busy = await pool.query(
         `SELECT start_time, end_time FROM bookings 
          WHERE court_id=$1 AND DATE(start_time)=$2
@@ -79,7 +77,6 @@ router.get("/suggest", requireAuth, async (req, res) => {
         [court.id, date]
       );
 
-      // Function to generate slots for a time range
       const generateSlots = (startTime, endTime) => {
         const slots = [];
         let start = localDateFromYMD(date);
@@ -92,8 +89,6 @@ router.get("/suggest", requireAuth, async (req, res) => {
 
         while (start.getTime() + duration * 60000 <= end.getTime()) {
           const slotEnd = new Date(start.getTime() + duration * 60000);
-
-          // ⏰ Skip if slot start < now + 1 hour (too soon)
           const now = new Date();
           if (start.getTime() < now.getTime() + 60 * 60 * 1000) {
             start = new Date(start.getTime() + 15 * 60000);
@@ -119,12 +114,10 @@ router.get("/suggest", requireAuth, async (req, res) => {
       };
 
       if (window === "full") {
-        // Full Day = Morning slots + Evening slots (no afternoon)
         const morningEnd = isWeekend ? "11:00" : "09:00";
         available.push(...generateSlots("06:00", morningEnd));
         available.push(...generateSlots("16:00", "22:00"));
       } else {
-        // Single time range
         available.push(...generateSlots(windowStart, windowEnd));
       }
     }
@@ -134,9 +127,10 @@ router.get("/suggest", requireAuth, async (req, res) => {
     console.error(err);
     res.status(500).json({ error: "Failed to suggest slots" });
   }
-}); 
+});
+
 /* -----------------------------------------------------------
-   2️⃣  POST /bookings  →  create booking with participants
+   2️⃣  POST /bookings → create booking (block-aware)
 ----------------------------------------------------------- */
 router.post("/", requireAuth, async (req, res) => {
   const client = await pool.connect();
@@ -156,16 +150,30 @@ router.post("/", requireAuth, async (req, res) => {
         .status(400)
         .json({ error: "Participants must be between 2 and 6." });
 
-    // Check 1 hour in advance first
+    // ensure 1 hour in advance
     const now = new Date();
     const start = new Date(start_time);
-    if (start.getTime() < now.getTime() + 60 * 60 * 1000) {
+    if (start.getTime() < now.getTime() + 60 * 60 * 1000)
       return res
         .status(400)
         .json({ error: "Bookings must be made at least 1 hour in advance." });
-    }
 
-    // 1️⃣ Basic email checks
+    // 🧱 Check if court/time falls inside any block
+    const dateStr = start_time.slice(0, 10);
+    const lot = start.getHours() < 12 ? "morning" : "evening"; // simple mapping
+    const blocked = await pool.query(
+      `SELECT 1 FROM blocks 
+       WHERE court_id=$1 
+         AND $2::date BETWEEN start_date AND end_date 
+         AND lot=$3`,
+      [court_id, dateStr, lot]
+    );
+    if (blocked.rowCount > 0)
+      return res
+        .status(400)
+        .json({ error: "Court is blocked for that time window." });
+
+    // validate participant emails
     const invalid = emails.filter(
       (e, i, arr) =>
         !e ||
@@ -181,7 +189,7 @@ router.post("/", requireAuth, async (req, res) => {
 
     await client.query("BEGIN");
 
-    // 2️⃣ Check court overlap
+    // overlap
     const overlap = await client.query(
       `SELECT id FROM bookings 
        WHERE court_id=$1 
@@ -191,27 +199,24 @@ router.post("/", requireAuth, async (req, res) => {
     );
     if (overlap.rowCount > 0) throw new Error("Slot already taken");
 
-    // 3️⃣ Collect participant users
+    // collect users
     const foundUsers = [];
     for (const email of emails) {
       const u = await client.query("SELECT * FROM users WHERE email=$1", [
         email,
       ]);
-      if (u.rowCount === 0) {
+      if (u.rowCount === 0)
         throw new Error(`Participant ${email} is not a registered user.`);
-      }
       foundUsers.push(u.rows[0]);
     }
 
-    // 4️⃣ Ban + frequency + overlap per user
+    // bans, cooldowns, etc.
     for (const user of foundUsers) {
       if (user.is_banned)
         return res.status(403).json({ error: `${user.email} is banned.` });
 
-      // Frequency rule
       const freq = await client.query(
-        `SELECT start_time
-         FROM bookings b
+        `SELECT start_time FROM bookings b
          JOIN booking_participants p ON p.booking_id=b.id
          WHERE p.user_id=$1 AND b.status IN ('confirmed','auto-cancelled')
          ORDER BY start_time DESC LIMIT 1`,
@@ -219,21 +224,17 @@ router.post("/", requireAuth, async (req, res) => {
       );
       if (freq.rowCount) {
         const last = new Date(freq.rows[0].start_time);
-        const now = new Date();
         const days =
           user.play_policy === "2d" ? 2 : user.play_policy === "1d" ? 1 : 3;
-        const nextAllowed = new Date(
-          last.getTime() + days * 24 * 60 * 60 * 1000
-        );
+        const nextAllowed = new Date(last.getTime() + days * 86400000);
         if (now < nextAllowed) {
-          const left = Math.ceil((nextAllowed - now) / (24 * 60 * 60 * 1000));
+          const left = Math.ceil((nextAllowed - now) / 86400000);
           return res.status(400).json({
             cooldown: `${user.email} can book again after ${left} day(s).`,
           });
         }
       }
 
-      // Overlap check
       const clash = await client.query(
         `SELECT 1 FROM bookings b
          JOIN booking_participants p ON p.booking_id=b.id
@@ -248,7 +249,7 @@ router.post("/", requireAuth, async (req, res) => {
           .json({ error: `${user.email} already has a booking at that time.` });
     }
 
-    // 5️⃣ Frequency check for creator
+    // self frequency
     const selfFreq = await client.query(
       `SELECT start_time FROM bookings b
        JOIN booking_participants p ON p.booking_id=b.id
@@ -258,36 +259,33 @@ router.post("/", requireAuth, async (req, res) => {
     );
     if (selfFreq.rowCount) {
       const last = new Date(selfFreq.rows[0].start_time);
-      const now = new Date();
       const days =
         creator.play_policy === "2d" ? 2 : creator.play_policy === "1d" ? 1 : 3;
-      const nextAllowed = new Date(last.getTime() + days * 24 * 60 * 60 * 1000);
+      const nextAllowed = new Date(last.getTime() + days * 86400000);
       if (now < nextAllowed) {
-        const left = Math.ceil((nextAllowed - now) / (24 * 60 * 60 * 1000));
+        const left = Math.ceil((nextAllowed - now) / 86400000);
         return res
           .status(400)
           .json({ cooldown: `You can book again after ${left} day(s).` });
       }
     }
 
-    // 6️⃣ Create booking
+    // create booking
     const booking = await client.query(
       `INSERT INTO bookings (court_id, creator_id, start_time, end_time, status)
        VALUES ($1,$2,$3,$4,'pending')
        RETURNING *`,
       [court_id, creator.id, start_time, end_time]
     );
-
     const bookingId = booking.rows[0].id;
 
-    // 7️⃣ Add creator (confirmed)
+    // add participants
     await client.query(
       `INSERT INTO booking_participants (booking_id, user_id, email, status)
        VALUES ($1,$2,$3,'confirmed')`,
       [bookingId, creator.id, creator.email]
     );
 
-    // 8️⃣ Add invited participants
     for (let i = 0; i < emails.length; i++) {
       const email = emails[i];
       const user = foundUsers[i];
@@ -298,7 +296,7 @@ router.post("/", requireAuth, async (req, res) => {
       );
     }
 
-    // 9️⃣ Send confirmation mails (each token = valid 60m)
+    // send confirmation emails (unchanged)
     const transporter = nodemailer.createTransport({
       host: process.env.MAIL_HOST,
       port: process.env.MAIL_PORT,
@@ -311,7 +309,9 @@ router.post("/", requireAuth, async (req, res) => {
         secret,
         { expiresIn: "60m" }
       );
-      const confirmUrl = `${process.env.APP_ORIGIN}/bookings/confirm/${token}`;
+      const backendBase = process.env.API_ORIGIN;
+      const confirmUrl = `${backendBase}/bookings/confirm/${token}`;
+
       await transporter.sendMail({
         from: process.env.MAIL_FROM,
         to: emails[i],
@@ -330,119 +330,120 @@ router.post("/", requireAuth, async (req, res) => {
     client.release();
   }
 });
-
 /* -----------------------------------------------------------
    3️⃣  GET /bookings/confirm/:token → confirm participant
+   ✅ Final fix: skip if cancelled/expired, all participants confirm → booking flips
 ----------------------------------------------------------- */
 router.get("/confirm/:token", async (req, res) => {
   const { token } = req.params;
   const client = await pool.connect();
+
   try {
     const secret = process.env.APP_SIGNING_SECRET || "tempsecret";
     const decoded = jwt.verify(token, secret);
-    const { bookingId, email } = decoded;
+    const bookingId = decoded.bookingId;
+    const email = decoded.email.trim().toLowerCase();
 
     await client.query("BEGIN");
 
-    // verify pending participant
-    const part = await client.query(
-      `SELECT * FROM booking_participants
-       WHERE booking_id=$1 AND email=$2 AND status='pending'`,
+    // 🔍 1️⃣ Check booking status first
+    const bookingCheck = await client.query(
+      `SELECT status FROM bookings WHERE id=$1`,
+      [bookingId]
+    );
+
+    if (bookingCheck.rowCount === 0) {
+      await client.query("ROLLBACK");
+      return res.send(`
+        <h2>❌ Invalid Booking</h2>
+        <p>This booking no longer exists.</p>
+      `);
+    }
+
+    const currentStatus = bookingCheck.rows[0].status;
+    if (["cancelled", "auto-cancelled"].includes(currentStatus)) {
+      await client.query("ROLLBACK");
+      return res.send(`
+        <h2>⚠️ Booking Cancelled</h2>
+        <p>This booking has already been cancelled and cannot be confirmed.</p>
+      `);
+    }
+
+    // 🔍 2️⃣ Find participant record (case-insensitive)
+    const partRes = await client.query(
+      `SELECT status FROM booking_participants 
+       WHERE booking_id=$1 AND LOWER(email)=$2`,
       [bookingId, email]
     );
-    if (part.rowCount === 0)
-      throw new Error("Already confirmed or invalid link.");
+    if (partRes.rowCount === 0) {
+      await client.query("ROLLBACK");
+      return res.send(`
+        <h2>❌ Invalid Link</h2>
+        <p>This confirmation link is invalid or expired.</p>
+      `);
+    }
 
-    // mark confirmed
+    if (partRes.rows[0].status === "confirmed") {
+      await client.query("ROLLBACK");
+      return res.send(`
+        <h2>✅ Already Confirmed!</h2>
+        <p>Your confirmation was already recorded earlier.</p>
+      `);
+    }
+
+    // ✅ 3️⃣ Mark this participant confirmed
     await client.query(
-      `UPDATE booking_participants
-       SET status='confirmed', confirmed_at=now()
-       WHERE booking_id=$1 AND email=$2`,
+      `UPDATE booking_participants 
+         SET status='confirmed', confirmed_at=now()
+       WHERE booking_id=$1 AND LOWER(email)=$2`,
       [bookingId, email]
     );
 
-    // check if all confirmed
-    const pending = await client.query(
+    // ✅ 4️⃣ Check if any participants still pending
+    const pendingCheck = await client.query(
       `SELECT COUNT(*) FROM booking_participants
        WHERE booking_id=$1 AND status='pending'`,
       [bookingId]
     );
-    if (parseInt(pending.rows[0].count) === 0)
+    const pendingCount = parseInt(pendingCheck.rows[0].count, 10);
+
+    // ✅ 5️⃣ If all confirmed and booking still pending, flip to confirmed
+    if (pendingCount === 0 && currentStatus === "pending") {
       await client.query(
-        `UPDATE bookings SET status='confirmed', updated_at=now()
+        `UPDATE bookings 
+           SET status='confirmed', updated_at=now()
          WHERE id=$1`,
         [bookingId]
       );
-    // 🎯 Send reminder email 1 hour before slot start
-    const booking = await client.query(
-      `SELECT b.start_time, c.name AS court_name
-     FROM bookings b
-     JOIN courts c ON b.court_id=c.id
-    WHERE b.id=$1`,
-      [bookingId]
-    );
-
-    if (booking.rowCount) {
-      const startTime = new Date(booking.rows[0].start_time);
-      const courtName = booking.rows[0].court_name;
-
-      // Fetch all confirmed participant emails
-      const confirmed = await client.query(
-        `SELECT email FROM booking_participants WHERE booking_id=$1 AND status='confirmed'`,
-        [bookingId]
+      console.log(`✅ Booking ${bookingId} confirmed (all participants).`);
+    } else {
+      console.log(
+        `⏳ Booking ${bookingId}: ${pendingCount} participant(s) still pending.`
       );
-      const recipientEmails = confirmed.rows.map((r) => r.email);
-
-      // Compute delay until 1 hour before start
-      const now = new Date();
-      const reminderTime = new Date(startTime.getTime() - 60 * 60 * 1000);
-      const delay = reminderTime.getTime() - now.getTime();
-
-      if (delay > 0) {
-        // Schedule email using setTimeout (simple for now)
-        setTimeout(async () => {
-          try {
-            const transporter = nodemailer.createTransport({
-              host: process.env.MAIL_HOST,
-              port: process.env.MAIL_PORT,
-              auth: {
-                user: process.env.MAIL_USER,
-                pass: process.env.MAIL_PASS,
-              },
-            });
-            for (const to of recipientEmails) {
-              await transporter.sendMail({
-                from: process.env.MAIL_FROM,
-                to,
-                subject: "Reminder: Your Court Booking starts in 1 hour",
-                text: `Hello,\n\nThis is a friendly reminder that your badminton court booking at ${courtName} starts at ${startTime.toLocaleTimeString(
-                  [],
-                  { hour: "2-digit", minute: "2-digit" }
-                )}.\n\n- Badminton Court Management System`,
-              });
-            }
-            console.log(`✅ Reminder emails sent for booking ${bookingId}`);
-          } catch (mailErr) {
-            console.error(`❌ Reminder mail failed:`, mailErr.message);
-          }
-        }, delay);
-      }
     }
 
     await client.query("COMMIT");
+
+    // ✅ 6️⃣ Response HTML
     res.send(`
-      <h2>✅ Booking confirmed!</h2>
-      <p>Thank you ${email}. All participants confirmed → booking active.</p>
+      <h2>✅ Confirmation Successful!</h2>
+      <p>Thank you ${email}, your participation has been confirmed.</p>
+      ${
+        currentStatus === "cancelled" || currentStatus === "auto-cancelled"
+          ? `<p>⚠️ However, this booking was cancelled earlier.</p>`
+          : pendingCount === 0
+          ? `<p>🎉 All participants have confirmed — the booking is now active.</p>`
+          : `<p>⏳ Waiting for remaining participant(s) to confirm.</p>`
+      }
     `);
   } catch (err) {
     await client.query("ROLLBACK");
-    console.error(err);
+    console.error("❌ Confirm route error:", err.message);
     res.status(400).send(`<h2>❌ Invalid or expired link</h2>`);
   } finally {
     client.release();
   }
 });
-
 /* -----------------------------------------------------------
    4️⃣  GET /bookings/mine  →  list user's bookings
 ----------------------------------------------------------- */
@@ -469,33 +470,62 @@ router.get("/mine", requireAuth, async (req, res) => {
     res.status(500).json({ error: "Failed to load bookings" });
   }
 });
-
 /* -----------------------------------------------------------
    5️⃣  POST /bookings/:id/cancel  →  user cancels a booking
 ----------------------------------------------------------- */
 router.post("/:id/cancel", requireAuth, async (req, res) => {
+  const client = await pool.connect();
   try {
     const bookingId = req.params.id;
     const userId = req.user.id;
 
-    // user must be participant
-    const check = await pool.query(
-      `SELECT * FROM booking_participants WHERE booking_id=$1 AND user_id=$2`,
+    await client.query("BEGIN");
+
+    // 🔒 Ensure user is participant
+    const check = await client.query(
+      `SELECT b.status, b.start_time, b.end_time 
+         FROM bookings b
+         JOIN booking_participants p ON p.booking_id=b.id
+        WHERE b.id=$1 AND p.user_id=$2`,
       [bookingId, userId]
     );
-    if (check.rowCount === 0)
-      return res.status(403).json({ error: "Not your booking" });
 
-    await pool.query(
-      `UPDATE bookings SET status='cancelled', updated_at=now()
-       WHERE id=$1 AND status!='cancelled'`,
+    if (check.rowCount === 0) throw new Error("Not your booking.");
+
+    const { status, start_time, end_time } = check.rows[0];
+
+    // 🛑 Already cancelled
+    if (status === "cancelled" || status === "auto-cancelled")
+      throw new Error("Booking is already cancelled.");
+
+    // 🕐 Check 1-hour rule (user can cancel only ≥ 1 hour before start)
+    const now = new Date();
+    const start = new Date(start_time);
+    if (start.getTime() - now.getTime() < 60 * 60 * 1000)
+      throw new Error("Cannot cancel within 1 hour of start time.");
+
+    // ✅ Cancel booking
+    await client.query(
+      `UPDATE bookings SET status='cancelled', updated_at=now() WHERE id=$1`,
       [bookingId]
     );
 
-    res.json({ ok: true });
+    // 🗓️ Log cancellation with original start/end times
+    await client.query(
+      `INSERT INTO recent_cancellations 
+         (booking_id, original_start, original_end, display_from, display_to, reason)
+       VALUES ($1, $2, $3, now(), now() + interval '15 minutes', 'User cancelled')`,
+      [bookingId, start_time, end_time]
+    );
+
+    await client.query("COMMIT");
+    res.json({ ok: true, message: "Booking cancelled successfully." });
   } catch (err) {
+    await client.query("ROLLBACK");
     console.error(err);
-    res.status(500).json({ error: "Failed to cancel booking" });
+    res.status(400).json({ error: err.message });
+  } finally {
+    client.release();
   }
 });
 

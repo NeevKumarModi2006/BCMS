@@ -6,10 +6,12 @@ import authRoutes from "./routes/auth.js";
 import bookingRoutes from "./routes/bookings.js";
 import { startScheduler } from "./services/scheduler.js";
 import cookieParser from "cookie-parser";
-import adminApprovalRoutes from "./routes/adminApprovals.js";
 import adminRoutes from "./routes/admin.js";
 import helmet from "helmet";
+import courtsRouter from "./routes/courts.js";   
 import rateLimit from "express-rate-limit";
+import adminBlocks from "./routes/adminBlocks.js";
+import adminBookings from "./routes/adminBookings.js";
 
 dotenv.config();
 
@@ -38,9 +40,10 @@ app.use(
 // Routes
 app.use("/auth", authRoutes);
 app.use("/bookings", bookingRoutes);
-app.use("/admin", adminApprovalRoutes);
 app.use("/admin", adminRoutes);
-
+app.use("/courts", courtsRouter);  
+app.use("/api/admin/blocks", adminBlocks);
+app.use("/api/admin/bookings", adminBookings);
 // check
 app.get("/", (req, res) => {
   res.send("🏸 Badminton Court Management System API is running...");
@@ -48,7 +51,7 @@ app.get("/", (req, res) => {
 
 // Start server
 const PORT = process.env.PORT || 8080;
-app.listen(PORT, async () => {
+app.listen(PORT, async () => { 
   try {
     await pool.query("SELECT 1");
     console.log(`✅ Server running on port ${PORT}`);

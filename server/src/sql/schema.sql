@@ -86,7 +86,7 @@ CREATE INDEX IF NOT EXISTS idx_bookings_times ON bookings(start_time, end_time);
 CREATE INDEX IF NOT EXISTS idx_bookings_creator ON bookings(creator_id);
 
 
---  ADMIN
+--  ADMIN APPROVALS NOT NEEDED 
 
 CREATE TABLE IF NOT EXISTS admin_approvals (
   id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
@@ -96,3 +96,33 @@ CREATE TABLE IF NOT EXISTS admin_approvals (
   expires_at TIMESTAMPTZ,
   approved_at TIMESTAMPTZ
 );
+
+-- added 4 pm 18 october
+CREATE INDEX IF NOT EXISTS idx_blocks_court ON blocks(court_id, start_date, end_date);
+CREATE INDEX IF NOT EXISTS idx_recent_cancel ON recent_cancellations(created_at);
+UPDATE users SET role='admin' WHERE email='neevamodi@gmail.com';
+
+
+CREATE UNIQUE INDEX IF NOT EXISTS users_email_lower_uk
+ON users ((LOWER(email)));
+
+-- Fakers
+
+-- Create unauthorized_attempts table
+CREATE TABLE IF NOT EXISTS unauthorized_attempts (
+  id SERIAL PRIMARY KEY,
+  email VARCHAR(255) UNIQUE NOT NULL,
+  reason VARCHAR(100) NOT NULL,
+  attempted_at TIMESTAMP DEFAULT NOW(),
+  attempt_count INTEGER DEFAULT 1,
+  created_at TIMESTAMP DEFAULT NOW()
+);
+
+-- Index for faster lookups
+CREATE INDEX idx_unauthorized_email ON unauthorized_attempts(email);
+CREATE INDEX idx_unauthorized_attempted_at ON unauthorized_attempts(attempted_at DESC);
+
+--added 12:23 am 19 oct 
+
+ALTER TABLE bookings ADD COLUMN IF NOT EXISTS reminder_sent BOOLEAN NOT NULL DEFAULT FALSE;
+CREATE INDEX IF NOT EXISTS idx_bookings_reminder ON bookings (status, start_time, reminder_sent);

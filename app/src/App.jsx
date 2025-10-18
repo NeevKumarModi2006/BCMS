@@ -1,6 +1,6 @@
 import { useState, useEffect } from "react";
 import { Routes, Route, useLocation } from "react-router-dom";
-
+import AdminList from "./pages/AdminList";
 import NavbarUser from "./components/NavbarUser";
 import NavbarAdmin from "./components/NavbarAdmin";
 import Protected from "./components/Protected";
@@ -16,7 +16,7 @@ import AdminUsers from "./pages/AdminUsers";
 import AdminAudit from "./pages/AdminAudit";
 import AdminDashboard from "./pages/AdminDashboard";
 import Dashboard from "./pages/Dashboard";
-
+import AdminBookings from "./pages/AdminBookings";
 export default function App() {
   const [role, setRole] = useState(null);
   const location = useLocation();
@@ -27,7 +27,9 @@ export default function App() {
         const res = await fetch(`${import.meta.env.VITE_API_URL}/auth/me`, {
           credentials: "include",
         });
-        if (!res.ok) throw new Error("Unauthorized");
+        if (!res.ok) {
+          throw new Error("Unauthorized");
+        }
         const data = await res.json();
         setRole(data.role);
       } catch {
@@ -63,6 +65,8 @@ export default function App() {
           <Route path="/my" element={<MyBookings />} />
 
           {/* Admin routes */}
+          <Route path="/admin/bookings" element={<AdminBookings />} />
+          <Route path="/admin/admins" element={<AdminList />} />
           <Route path="/admin/dashboard" element={<AdminDashboard />} />
           <Route path="/admin/courts" element={<AdminCourts />} />
           <Route path="/admin/blocks" element={<AdminBlocks />} />

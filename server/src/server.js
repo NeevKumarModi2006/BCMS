@@ -7,6 +7,8 @@ import adminRoutes from "./routes/admin.js";
 import approvalRoutes from "./routes/approvals.js";
 import userRoutes from "./routes/users.js";
 
+// USELESS FILE
+
 dotenv.config();
 const app = express();
 app.use(cors({ origin: process.env.APP_ORIGIN, credentials: true }));
