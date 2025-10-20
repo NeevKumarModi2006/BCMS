@@ -4,7 +4,7 @@ import { useEffect, useState } from "react";
 
 export default function AdminDashboard() {
     const navigate = useNavigate();
-    const [stats, setStats] = useState({ users: 0, bookings: 0, blocks: 0, audits: 0 });
+    const [stats, setStats] = useState({ users: 0, bookings: 0, blocks: 0 });
 
     useEffect(() => {
         async function fetchStats() {
@@ -44,11 +44,7 @@ export default function AdminDashboard() {
                         <div className="stat-card" onClick={() => navigate("/admin/blocks")}>
                             <h2>🚫 Blocks</h2>
                             <p>{stats.blocks}</p>
-                        </div>
-                        <div className="stat-card" onClick={() => navigate("/admin/audit")}>
-                            <h2>🧾 Audit Logs</h2>
-                            <p>{stats.audits}</p>
-                        </div>
+                        </div>  
                     </div>
                 </div>
                 <div className="quick-actions">

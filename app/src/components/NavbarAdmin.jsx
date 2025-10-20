@@ -1,5 +1,6 @@
 // app/src/components/NavbarAdmin.jsx
 import { Link, NavLink, useNavigate } from "react-router-dom";
+import { useEffect } from "react";
 
 export default function NavbarAdmin() {
     const navigate = useNavigate();
@@ -13,7 +14,21 @@ export default function NavbarAdmin() {
         }
     }
 
-    const active = ({ isActive }) => (isActive ? "nav-item active" : "nav-item");
+    function toggleTheme() {
+        const html = document.documentElement;
+        const current = html.getAttribute("data-theme") || "light";
+        const next = current === "dark" ? "light" : "dark";
+        html.setAttribute("data-theme", next);
+        localStorage.setItem("theme", next);
+    }
+
+    useEffect(() => {
+        const saved = localStorage.getItem("theme") || "light";
+        document.documentElement.setAttribute("data-theme", saved);
+    }, []);
+
+    const active = ({ isActive }) =>
+        isActive ? "nav-item active" : "nav-item";
 
     return (
         <header className="admin-navbar">
@@ -39,11 +54,11 @@ export default function NavbarAdmin() {
                 <NavLink to="/admin/audit" className={active}>
                     Audit
                 </NavLink>
-                <NavLink to="/admin/approvals" className={active}>
-                    Approvals
-                </NavLink>
                 <button className="btn danger" onClick={logout}>
                     Logout
+                </button>
+                <button className="btn" onClick={toggleTheme}>
+                    
                 </button>
             </nav>
         </header>

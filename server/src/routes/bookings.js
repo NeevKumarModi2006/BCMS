@@ -102,6 +102,7 @@ router.get("/suggest", requireAuth, async (req, res) => {
           if (!overlap)
             slots.push({
               id: `${court.id}-${start.toISOString()}`,
+              slot_key: `${court.id}-${start.toISOString()}`,
               court_id: court.id,
               court_name: court.name,
               start_time: start.toISOString(),
@@ -323,6 +324,11 @@ router.post("/", requireAuth, async (req, res) => {
     await client.query("COMMIT");
     res.status(201).json({ booking: booking.rows[0] });
   } catch (err) {
+    if (err.code === "23505") {
+      return res
+        .status(400)
+        .json({ error: "Slot already booked or unavailable." });
+    }
     await client.query("ROLLBACK");
     console.error(err);
     res.status(500).json({ error: err.message || "Booking failed" });

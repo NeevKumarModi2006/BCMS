@@ -28,16 +28,19 @@ export function startScheduler() {
 }
 
 /* -----------------------------------------------------------
-   1️⃣  Send 1-hour-before reminders (confirmed-only)
+   1️⃣  Send 1-hour-before reminders 
 ----------------------------------------------------------- */
 async function sendReminders(oneHourLater) {
   const client = await pool.connect();
   try {
-    // Safer ±5m window to avoid drift
     const from = new Date(oneHourLater.getTime() - 5 * 60 * 1000);
     const to = new Date(oneHourLater.getTime() + 5 * 60 * 1000);
+    const mailer = makeTransporter();
 
-    const upcoming = await client.query(
+    /* ---------------------------------------------
+       1️⃣ Confirmed Bookings — Normal Reminder
+    --------------------------------------------- */
+    const confirmed = await client.query(
       `SELECT b.id, b.start_time, b.end_time, c.name AS court_name,
               array_agg(p.email) AS emails
          FROM bookings b
@@ -51,11 +54,7 @@ async function sendReminders(oneHourLater) {
       [from, to]
     );
 
-    if (upcoming.rowCount === 0) return;
-
-    const mailer = makeTransporter();
-
-    for (const b of upcoming.rows) {
+    for (const b of confirmed.rows) {
       if (!b.emails || b.emails.length === 0) continue;
 
       const humanStart = new Date(b.start_time).toLocaleString("en-IN", {
@@ -81,6 +80,48 @@ Please reach the venue 10 minutes early.`;
         console.log(`📧 Reminder sent for booking ${b.id}`);
       } catch (e) {
         console.error(`❌ Reminder send failed for ${b.id}:`, e.message);
+      }
+    }
+
+    /* ---------------------------------------------
+       2️⃣ Pending Bookings — “Still Pending” Notice
+    --------------------------------------------- */
+    const pending = await client.query(
+      `SELECT b.id, b.start_time, b.end_time, c.name AS court_name,
+              array_agg(bp.email) AS emails
+         FROM bookings b
+         JOIN courts c ON b.court_id = c.id
+         JOIN booking_participants bp ON bp.booking_id = b.id
+        WHERE b.status = 'pending'
+          AND b.start_time >= $1 AND b.start_time < $2
+        GROUP BY b.id, c.name`,
+      [from, to]
+    );
+
+    for (const b of pending.rows) {
+      if (!b.emails || b.emails.length === 0) continue;
+
+      const humanStart = new Date(b.start_time).toLocaleString("en-IN", {
+        timeZone: "Asia/Kolkata",
+        hour: "2-digit",
+        minute: "2-digit",
+      });
+
+      const text = `⚠️ Your booking for ${b.court_name} at ${humanStart} is still pending.
+Not all participants have confirmed yet. 
+
+Please remind them to confirm soon, otherwise this booking will be automatically cancelled 5 minutes before the start time.`;
+
+      try {
+        await mailer.sendMail({
+          from: process.env.MAIL_FROM,
+          to: b.emails,
+          subject: "⚠️ Booking Still Pending Confirmation",
+          text,
+        });
+        console.log(`📧 Pending reminder sent for booking ${b.id}`);
+      } catch (e) {
+        console.error(`❌ Pending reminder failed for ${b.id}:`, e.message);
       }
     }
   } catch (err) {

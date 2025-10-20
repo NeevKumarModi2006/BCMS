@@ -1,3 +1,4 @@
+// app/src/pages/AdminBookings.jsx
 import { useEffect, useState } from "react";
 import React from "react";
 
@@ -14,7 +15,7 @@ export default function AdminBookings() {
     setLoading(true);
     try {
       const res = await fetch(
-        `${import.meta.env.VITE_API_URL}/admin/bookings?mode=${selectedMode}`,
+        `${import.meta.env.VITE_API_URL}/api/admin/bookings?mode=${selectedMode}`,
         { credentials: "include" }
       );
       const data = await res.json();
@@ -38,7 +39,7 @@ export default function AdminBookings() {
     setActingId(id);
     try {
       const res = await fetch(
-        `${import.meta.env.VITE_API_URL}/admin/bookings/${id}/cancel`,
+        `${import.meta.env.VITE_API_URL}/api/admin/bookings/${id}/cancel`,
         {
           method: "POST",
           credentials: "include",
@@ -54,31 +55,30 @@ export default function AdminBookings() {
       setActingId(null);
     }
   }
- 
+
   // 👥 Toggle participant list view
   async function toggleParticipants(id) {
-    console.log("hello");
-
     if (expandedId === id) {
       setExpandedId(null);
       return;
     }
-    console.log("hello");
-
 
     setExpandedId(id);
+
     if (!participants[id]) {
       try {
         const res = await fetch(
-          `${import.meta.env.VITE_API_URL}/admin/bookings/${id}/participants`,
+          `${import.meta.env.VITE_API_URL}/api/admin/bookings/${id}/participants`,
           { credentials: "include" }
         );
+        if (!res.ok) {
+          console.error("Failed to fetch participants");
+          return;
+        }
         const data = await res.json();
-        if (res.ok)
-          setParticipants((prev) => ({ ...prev, [id]: data.participants }));
-        else alert(data.error || "Failed to load participants");
+        setParticipants((prev) => ({ ...prev, [id]: data.participants || [] }));
       } catch (err) {
-        console.error(err);
+        console.error("Error fetching participants:", err);
       }
     }
   }
@@ -104,9 +104,11 @@ export default function AdminBookings() {
           onChange={(e) => setMode(e.target.value)}
           style={{ padding: "0.4rem 0.8rem", borderRadius: "6px" }}
         >
-          <option value="default">Cancelable (Default)</option>
-          <option value="explicit">All (Read-Only)</option>
+          <option value="current">Current (±1 hour)</option>
+          <option value="default">Upcoming (Cancelable)</option>
+          <option value="explicit">All</option>
         </select>
+
       </div>
 
       {/* Table */}
@@ -154,7 +156,7 @@ export default function AdminBookings() {
                         <button
                           className={
                             b.status === "cancelled" ||
-                            b.status === "auto-cancelled"
+                              b.status === "auto-cancelled"
                               ? "btn-sm"
                               : "btn danger"
                           }
@@ -168,12 +170,12 @@ export default function AdminBookings() {
                           {b.status === "cancelled"
                             ? "Cancelled"
                             : actingId === b.id
-                            ? "Cancelling..."
-                            : "Cancel"}
+                              ? "Cancelling..."
+                              : "Cancel"}
                         </button>
                       ) : (
                         <span style={{ color: "#888" }}>—</span>
-                      )} 
+                      )}
                     </td>
                   </tr>
 

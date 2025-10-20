@@ -1,3 +1,4 @@
+// server/src/routes/adminBookings.js
 import express from "express";
 import { pool } from "../db/pool.js";
 import { requireAdmin } from "../middleware/auth.js";
@@ -13,21 +14,26 @@ router.get("/", requireAdmin, async (req, res, next) => {
     const mode = req.query.mode || "default";
     const adminId = req.user.id;
 
-    let query = `
-      SELECT b.id, b.court_id, c.name AS court_name,
-             b.start_time, b.end_time, b.status,
-             u.email AS creator_email
-        FROM bookings b
-        JOIN courts c ON c.id=b.court_id
-        JOIN users u ON u.id=b.creator_id
-       WHERE b.creator_id <> $1
-         AND b.status NOT IN ('cancelled','auto-cancelled')
-         AND b.start_time >= now() + interval '1 hour'
-       ORDER BY b.start_time ASC
-       LIMIT 100;
-    `;
+    let query;
+    const params = [adminId];
 
-    if (mode === "explicit") {
+    if (mode === "current") {
+      // 🕒 Current Bookings (±1 hour)
+      query = `
+        SELECT b.id, b.court_id, c.name AS court_name,
+               b.start_time, b.end_time, b.status,
+               u.email AS creator_email
+          FROM bookings b
+          JOIN courts c ON c.id=b.court_id
+          JOIN users u ON u.id=b.creator_id
+         WHERE b.creator_id <> $1
+           AND b.start_time <= now() + interval '1 hour'
+           AND b.end_time >= now() - interval '1 hour'
+         ORDER BY b.start_time ASC
+         LIMIT 100;
+      `;
+    } else if (mode === "explicit") {
+      // 🗂️ All Bookings
       query = `
         SELECT b.id, b.court_id, c.name AS court_name,
                b.start_time, b.end_time, b.status,
@@ -39,9 +45,24 @@ router.get("/", requireAdmin, async (req, res, next) => {
          ORDER BY b.start_time DESC
          LIMIT 200;
       `;
+    } else {
+      // ⏩ Default (Upcoming & Cancelable)
+      query = `
+        SELECT b.id, b.court_id, c.name AS court_name,
+               b.start_time, b.end_time, b.status,
+               u.email AS creator_email
+          FROM bookings b
+          JOIN courts c ON c.id=b.court_id
+          JOIN users u ON u.id=b.creator_id
+         WHERE b.creator_id <> $1
+           AND b.status NOT IN ('cancelled','auto-cancelled')
+           AND b.start_time >= now() + interval '1 hour'
+         ORDER BY b.start_time ASC
+         LIMIT 100;
+      `;
     }
 
-    const { rows } = await pool.query(query, [adminId]);
+    const { rows } = await pool.query(query, params);
     res.json({ items: rows });
   } catch (err) {
     console.error("Admin fetch bookings error:", err);
@@ -51,15 +72,17 @@ router.get("/", requireAdmin, async (req, res, next) => {
 
 /* -----------------------------------------------------------
    2️⃣ GET /api/admin/bookings/:id/participants
+   → Show ALL participants (user_id + email)
 ----------------------------------------------------------- */
 router.get("/:id/participants", requireAdmin, async (req, res, next) => {
   try {
     const { id } = req.params;
     const q = `
-      SELECT DISTINCT email
-        FROM booking_participants
-       WHERE booking_id=$1 AND email IS NOT NULL
-       ORDER BY email ASC;
+      SELECT DISTINCT COALESCE(u.email, bp.email) AS email
+      FROM booking_participants bp
+      LEFT JOIN users u ON u.id = bp.user_id
+      WHERE bp.booking_id = $1
+      ORDER BY email ASC;
     `;
     const { rows } = await pool.query(q, [id]);
     res.json({ participants: rows });
@@ -126,14 +149,19 @@ router.post("/:id/cancel", requireAdmin, async (req, res, next) => {
 
     // 👥 Collect all participant emails + creator
     const pRes = await client.query(
-      `SELECT DISTINCT email FROM booking_participants WHERE booking_id=$1`,
+      `
+      SELECT DISTINCT COALESCE(u.email, bp.email) AS email
+      FROM booking_participants bp
+      LEFT JOIN users u ON u.id = bp.user_id
+      WHERE bp.booking_id = $1;
+      `,
       [id]
     );
+
     const emails = [
       booking.creator_email,
       ...pRes.rows.map((r) => r.email),
     ].filter(Boolean);
-
     const uniqueEmails = [...new Set(emails)];
 
     await client.query("COMMIT");
@@ -142,12 +170,13 @@ router.post("/:id/cancel", requireAdmin, async (req, res, next) => {
     if (uniqueEmails.length > 0) {
       const transporter = nodemailer.createTransport({
         host: process.env.MAIL_HOST,
-        port: process.env.MAIL_PORT,
+        port: Number(process.env.MAIL_PORT) || 587,
         secure: false,
         auth: {
           user: process.env.MAIL_USER,
           pass: process.env.MAIL_PASS,
         },
+        tls: { rejectUnauthorized: false },
       });
 
       const subject = "🏸 Booking Cancelled by Admin";
@@ -160,40 +189,32 @@ Court: ${court}
 Start: ${new Date(startTime).toLocaleString("en-IN", {
         timeZone: "Asia/Kolkata",
       })}
-End: ${new Date(endTime).toLocaleString("en-IN", {
-        timeZone: "Asia/Kolkata",
-      })}
+End: ${new Date(endTime).toLocaleString("en-IN", { timeZone: "Asia/Kolkata" })}
 
 We apologize for the inconvenience.
 
 — Badminton Court Management System
 `;
 
-      try {
-        await Promise.all(
-          uniqueEmails.map(async (email) => {
-            try {
-              await transporter.sendMail({
-                from: process.env.MAIL_FROM,
-                to: email,
-                subject,
-                text: text(
-                  booking.court_name,
-                  booking.start_time,
-                  booking.end_time
-                ),
-              });
-              console.log(`📨 Mail sent to ${email}`);
-            } catch (mailErr) {
-              console.error(
-                `❌ Failed to send email to ${email}:`,
-                mailErr.message
-              );
-            }
-          })
-        );
-      } catch (e) {
-        console.error("❌ Email sending batch failed:", e.message);
+      for (const email of uniqueEmails) {
+        try {
+          await transporter.sendMail({
+            from: process.env.MAIL_FROM,
+            to: email,
+            subject,
+            text: text(
+              booking.court_name,
+              booking.start_time,
+              booking.end_time
+            ),
+          });
+          console.log(`📨 Mail sent to ${email}`);
+        } catch (mailErr) {
+          console.error(
+            `❌ Failed to send email to ${email}:`,
+            mailErr.message
+          );
+        }
       }
     }
 

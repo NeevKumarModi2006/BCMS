@@ -174,20 +174,34 @@ router.post(
 /* -----------------------------------------------------------
    5️⃣  GET /admin/audit → recent cancellations/logs
 ----------------------------------------------------------- */
-router.get("/audit", requireAuth, requireAdmin, async (_req, res) => {
+router.get("/audit", requireAuth, requireAdmin, async (req, res) => {
   try {
-    const rows = (
-      await pool.query(
-        `SELECT id, booking_id, original_start, original_end, display_from, display_to, reason, created_at
-           FROM recent_cancellations
-          ORDER BY created_at DESC
-          LIMIT 50`
-      )
-    ).rows;
+    const { start, end } = req.query;
+
+    // Default: today’s logs (IST)
+    const today = new Date();
+    const startDate = start
+      ? new Date(start)
+      : new Date(today.setHours(0, 0, 0, 0));
+    const endDate = end
+      ? new Date(end)
+      : new Date(new Date().setHours(23, 59, 59, 999));
+
+    const { rows } = await pool.query(
+      `
+      SELECT id, booking_id, original_start, original_end,
+             display_from, display_to, reason, created_at
+        FROM recent_cancellations
+       WHERE created_at BETWEEN $1 AND $2
+       ORDER BY created_at DESC
+      `,
+      [startDate, endDate]
+    );
+
     res.json({ items: rows });
   } catch (err) {
     console.error("Admin audit error:", err.message);
-    res.status(500).json({ error: "Failed to fetch audit" });
+    res.status(500).json({ error: "Failed to fetch audit logs" });
   }
 });
 
@@ -394,25 +408,30 @@ router.delete("/admins/:id", requireAuth, requireAdmin, async (req, res) => {
 });
 // ✅ Admin Dashboard Stats Summary
 // ✅ Admin Dashboard Stats Summary (filtered + meaningful)
+
 router.get("/stats", requireAuth, requireAdmin, async (_req, res) => {
   try {
     const { rows } = await pool.query(`
       SELECT
-        -- count only normal, non-banned users
-        (SELECT COUNT(*)::int FROM users WHERE role='user' AND is_banned=false) AS users,
-        -- count only active (pending/confirmed) bookings that haven't started yet
-        (SELECT COUNT(*)::int FROM bookings
-           WHERE status IN ('pending','confirmed')
-             AND start_time >= now()) AS bookings,
-        -- count blocks that are still active
-        (SELECT COUNT(*)::int FROM blocks
-           WHERE end_date >= CURRENT_DATE) AS blocks,
-        -- count recent cancellations in the past 7 days
-        (SELECT COUNT(*)::int FROM recent_cancellations
-           WHERE created_at >= now() - interval '7 days') AS audits
+        -- 👥 Count only normal, non-banned users
+        (SELECT COUNT(*)::int 
+           FROM users 
+          WHERE role='user' AND is_banned=false) AS users,
+
+        -- 📅 Count bookings from last hour to next hour
+        (SELECT COUNT(*)::int 
+           FROM bookings
+          WHERE status IN ('pending','confirmed')
+            AND start_time <= now() + interval '1 hour'
+            AND end_time >= now() - interval '1 hour') AS bookings,
+
+        -- 🚫 Count blocks that are still active
+        (SELECT COUNT(*)::int 
+           FROM blocks
+          WHERE end_date >= CURRENT_DATE) AS blocks
     `);
 
-    res.json(rows[0] || { users: 0, bookings: 0, blocks: 0, audits: 0 });
+    res.json(rows[0] || { users: 0, bookings: 0, blocks: 0 });
   } catch (err) {
     console.error("Admin stats error:", err.message);
     res.status(500).json({ error: "Failed to fetch stats" });
